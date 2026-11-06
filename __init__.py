@@ -132,6 +132,12 @@ def register(ctx: Any):
         if item is None: raise KeyError("Proposal " + repr(pid) + " not found")
         if item.get("status") != "pending": raise ValueError("Proposal " + pid + " is not pending")
         target = Path(item["path"]).expanduser()
+        try:
+            current_content = target.read_text(encoding="utf-8") if target.exists() else None
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError("Cannot verify current file before accepting: " + str(exc))
+        if _hash(current_content) != item.get("old_hash"):
+            raise ValueError("File changed after this proposal was created; reject it and stage a fresh proposal.")
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix="." + target.name + ".patchreview-", dir=str(target.parent))
         try:
@@ -197,4 +203,3 @@ def register(ctx: Any):
     add_tool("patchreview_accept_all", "Accept every pending proposal and write them to disk.", {}, [], handle_accept_all)
     add_tool("patchreview_status", "Return pending, accepted, rejected, and total proposal counts.", {}, [], handle_status)
     ctx.register_hook("pre_tool_call", pre_tool_call)
-    ctx.patchreview_queue_file = queue_file
