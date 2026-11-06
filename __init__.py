@@ -168,10 +168,18 @@ def register(ctx: Any):
 
     def handle_accept_all(params, **kwargs):
         del params, kwargs
+        # Persist after each successful file so a later failure cannot lose earlier
+        # accepted statuses or leave already-written files marked pending.
+        accepted = []
         try:
-            accepted = mutate(lambda proposals: [accept_one(proposals, p["id"]) for p in list(proposals) if p.get("status") == "pending"])
+            with _LOCK:
+                proposals = _load(queue_file)
+                pending_ids = [p["id"] for p in proposals if p.get("status") == "pending"]
+            for pid in pending_ids:
+                accepted.append(mutate(lambda items, proposal_id=pid: accept_one(items, proposal_id)))
             return _json({"success": True, "accepted_count": len(accepted), "accepted": accepted})
-        except Exception as exc: return _json({"success": False, "error": str(exc)})
+        except Exception as exc:
+            return _json({"success": False, "error": str(exc), "accepted_count": len(accepted), "accepted": accepted})
 
     def handle_status(params, **kwargs):
         del params, kwargs
