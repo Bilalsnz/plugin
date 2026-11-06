@@ -17,7 +17,7 @@ PatchReview is a Hermes Agent Python plugin that intercepts supported file-writi
 
 ~~~bash
 cp -r patchreview ~/.hermes/plugins/patchreview
-hermes plugins doctor ~/.hermes/plugins/patchreview
+hermes plugins doctor ~/.hermes/plugins/patchreview --ci
 hermes plugins enable patchreview
 hermes plugins validate ./patchreview --install-deps
 ~~~
