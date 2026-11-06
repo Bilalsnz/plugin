@@ -1,0 +1,30 @@
+name: Hermes plugin validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out PatchReview
+        uses: actions/checkout@v4
+
+      - name: Install Hermes Agent
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.hermes/bin" >> "$GITHUB_PATH"
+
+      - name: Confirm Hermes CLI
+        run: hermes --version
+
+      - name: Run Plugin Doctor
+        run: hermes plugins doctor . --ci
+
+      - name: Run official catalog validator
+        run: hermes plugins validate . --install-deps
