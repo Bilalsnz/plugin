@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from plugins.plugin_storage import plugin_data_dir
+
 _WRITE_MARKERS = ("write_file", "patch", "apply_patch", "create_file", "edit_file", "str_replace", "search_replace")
 _PATH_KEYS = ("path", "file_path", "filename", "file", "target")
 _CONTENT_KEYS = ("content", "new_content", "new_string", "text", "body")
@@ -17,14 +19,12 @@ def _json(data):
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 def _data_dir(ctx):
-    candidate = None
-    getter = getattr(ctx, "plugin_data_dir", None)
-    if callable(getter):
-        try: candidate = getter()
-        except Exception: candidate = None
-    if candidate:
-        root = Path(candidate).expanduser()
-    else:
+    # Hermes' supported storage API creates a profile-scoped directory that
+    # survives plugin updates/removal. Keep a fallback for isolated unit tests.
+    del ctx
+    try:
+        root = Path(plugin_data_dir("patchreview")).expanduser()
+    except Exception:
         home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
         root = home / "plugin-data" / "patchreview"
     root.mkdir(parents=True, exist_ok=True)
