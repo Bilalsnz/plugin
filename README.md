@@ -27,6 +27,7 @@ hermes plugins enable patchreview
 Restart Hermes after activation if the current process was already running. Plugin activation may trigger Hermes environment synchronization; on resource-constrained Android/Termux devices, review the installer's proposed work before approving it.
 
 The plugin declares no third-party Python dependencies. The repository is flat: `__init__.py`, `plugin.yaml`, and the supporting files live at its root.
+PatchReview itself makes no network requests, sends no telemetry, and does not require API keys.
 
 ## Tools
 
