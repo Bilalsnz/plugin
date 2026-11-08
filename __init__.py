@@ -8,6 +8,7 @@ from typing import Any
 from plugins.plugin_storage import plugin_data_dir
 
 _WRITE_MARKERS = ("write_file", "patch", "apply_patch", "create_file", "edit_file", "str_replace", "search_replace")
+_WRITE_TOOL_NAMES = frozenset(_WRITE_MARKERS)
 _PATH_KEYS = ("path", "file_path", "filename", "file", "target")
 _CONTENT_KEYS = ("content", "new_content", "new_string", "text", "body")
 _LOCK = threading.RLock()
@@ -67,10 +68,30 @@ def _first_string(args, keys):
         if isinstance(value, str) and value.strip(): return value
     return None
 
+def _first_content(args, keys):
+    # Empty strings are valid file contents; distinguish them from missing/invalid values.
+    for key in keys:
+        if key in args:
+            value = args.get(key)
+            return value if isinstance(value, str) else None
+    return None
+
+def _is_write_tool(name):
+    # Match actual write-tool names, not arbitrary names containing "patch"
+    # (which also matches PatchReview's own management tools).
+    normalized = str(name or "").lower().rsplit(".", 1)[-1]
+    return any(normalized == candidate or normalized.endswith("_" + candidate)
+               for candidate in _WRITE_TOOL_NAMES)
+
 def _extract_proposal(tool_name, args):
     path = _first_string(args, _PATH_KEYS)
     if not path: return None
-    path = os.path.expanduser(path)
+    path = os.path.abspath(os.path.expanduser(path))
+    target = Path(path)
+    if target.is_symlink():
+        return None
+    if target.exists() and not target.is_file():
+        return None
     lowered = tool_name.lower()
     if "str_replace" in lowered or "search_replace" in lowered:
         old_string, new_string = args.get("old_string"), args.get("new_string")
@@ -79,7 +100,7 @@ def _extract_proposal(tool_name, args):
         except (OSError, UnicodeError): return None
         if old_string not in old_content: return None
         return path, old_content.replace(old_string, new_string, 1), old_content
-    content = _first_string(args, _CONTENT_KEYS)
+    content = _first_content(args, _CONTENT_KEYS)
     if content is None: return None
     try: old_content = Path(path).read_text(encoding="utf-8") if Path(path).exists() else None
     except (OSError, UnicodeError): return None
@@ -101,14 +122,18 @@ def register(ctx: Any):
     def pre_tool_call(tool_name="", args=None, task_id="", **kwargs):
         del task_id, kwargs
         name = str(tool_name or "")
-        if not any(marker in name.lower() for marker in _WRITE_MARKERS): return None
+        if not _is_write_tool(name): return None
         parsed = _extract_proposal(name, args if isinstance(args, dict) else {})
-        if parsed is None: return None
+        if parsed is None:
+            return {"action": "block", "message":
+                    "PatchReview blocked " + name +
+                    ": unsupported or invalid write arguments. Use a supported UTF-8 path/content shape; no file was changed."}
         path, new_content, old_content = parsed
         pid = uuid.uuid4().hex[:8]
         item = {
             "id": pid, "path": path, "tool": name, "old_content": old_content,
             "new_content": new_content, "diff": _diff(path, old_content, new_content),
+            "old_exists": old_content is not None,
             "old_hash": _hash(old_content), "new_hash": _hash(new_content),
             "status": "pending", "created_at": _now(), "updated_at": _now(), "reason": None
         }
@@ -132,11 +157,17 @@ def register(ctx: Any):
         if item is None: raise KeyError("Proposal " + repr(pid) + " not found")
         if item.get("status") != "pending": raise ValueError("Proposal " + pid + " is not pending")
         target = Path(item["path"]).expanduser()
+        if target.is_symlink():
+            raise ValueError("Target became a symbolic link after the proposal was staged.")
+        current_exists = target.exists()
+        if current_exists and not target.is_file():
+            raise ValueError("Target is no longer a regular file.")
         try:
-            current_content = target.read_text(encoding="utf-8") if target.exists() else None
+            current_content = target.read_text(encoding="utf-8") if current_exists else None
         except (OSError, UnicodeError) as exc:
             raise RuntimeError("Cannot verify current file before accepting: " + str(exc))
-        if _hash(current_content) != item.get("old_hash"):
+        expected_exists = item.get("old_exists", item.get("old_content") is not None)
+        if current_exists != expected_exists or _hash(current_content) != item.get("old_hash"):
             raise ValueError("File changed after this proposal was created; reject it and stage a fresh proposal.")
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix="." + target.name + ".patchreview-", dir=str(target.parent))
