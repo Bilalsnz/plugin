@@ -123,7 +123,12 @@ def register(ctx: Any):
         del task_id, kwargs
         name = str(tool_name or "")
         if not _is_write_tool(name): return None
-        parsed = _extract_proposal(name, args if isinstance(args, dict) else {})
+        try:
+            parsed = _extract_proposal(name, args if isinstance(args, dict) else {})
+        except Exception as exc:
+            return {"action": "block", "message":
+                    "PatchReview blocked " + name +
+                    ": proposal parsing failed; no file was changed (" + str(exc) + ")."}
         if parsed is None:
             return {"action": "block", "message":
                     "PatchReview blocked " + name +
