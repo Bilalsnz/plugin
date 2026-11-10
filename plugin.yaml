@@ -1,14 +1,9 @@
 name: patchreview
 version: 1.0.0
 description: >
-  Nothing writes to disk until you accept the diff. Intercepts write/patch tools,
-  queues proposed changes, and shows a review UI. Accept or reject per file.
-provides_tools:
-  - patchreview_list
-  - patchreview_accept
-  - patchreview_reject
-  - patchreview_accept_all
-  - patchreview_status
+  Routes recognized file-writing tool calls to Hermes' native human-approval
+  gate with a proposed diff. PatchReview never approves for the model or writes files.
+provides_tools: []
 provides_hooks:
   - pre_tool_call
 requires_hermes: ">=0.20"
