@@ -49,10 +49,8 @@ class PatchReviewTests(unittest.TestCase):
             "new_string": "changed line",
         })
         self.assertEqual(result["action"], "approve")
-        self.assertIn(" first", result["message"]) if False else None
         self.assertIn("-keep this line", result["message"])
         self.assertIn("+changed line", result["message"])
-        self.assertIn(" first", result["message"]) if False else None
         self.assertIn("last", result["message"])
         self.assertEqual(target.read_text(encoding="utf-8"), "first\nkeep this line\nlast\n")
 
