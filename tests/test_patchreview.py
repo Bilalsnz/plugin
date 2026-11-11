@@ -54,6 +54,20 @@ class PatchReviewTests(unittest.TestCase):
         self.assertIn("last", result["message"])
         self.assertEqual(target.read_text(encoding="utf-8"), "first\nkeep this line\nlast\n")
 
+    def test_core_patch_tool_replacement_uses_native_approval_and_preserves_context(self):
+        target = self.root / "core-patch.txt"
+        target.write_text("before\\nkeep this line\\nafter\\n", encoding="utf-8")
+        result = self.hook("patch", {
+            "path": str(target), "old_string": "keep this line",
+            "new_string": "patched line",
+        })
+        self.assertEqual(result["action"], "approve")
+        self.assertIn("-keep this line", result["message"])
+        self.assertIn("+patched line", result["message"])
+        self.assertIn("before", result["message"])
+        self.assertIn("after", result["message"])
+        self.assertEqual(target.read_text(encoding="utf-8"), "before\\nkeep this line\\nafter\\n")
+
     def test_replace_all_is_reflected_in_preview(self):
         target = self.root / "many.txt"
         target.write_text("x\ny\nx\n", encoding="utf-8")
