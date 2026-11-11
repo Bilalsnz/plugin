@@ -1,205 +1,103 @@
-"""PatchReview: stage file changes until a human explicitly accepts them."""
+"""PatchReview: route recognized file writes through Hermes' native human approval gate."""
 from __future__ import annotations
-import difflib, hashlib, json, os, tempfile, threading, uuid
-from datetime import datetime, timezone
+
+import difflib
+import os
 from pathlib import Path
 from typing import Any
 
-from plugins.plugin_storage import plugin_data_dir
-
-_WRITE_MARKERS = ("write_file", "patch", "apply_patch", "create_file", "edit_file", "str_replace", "search_replace")
+_WRITE_TOOL_NAMES = frozenset({
+    "write_file", "create_file", "edit_file", "str_replace",
+    "search_replace", "patch", "apply_patch",
+})
 _PATH_KEYS = ("path", "file_path", "filename", "file", "target")
-_CONTENT_KEYS = ("content", "new_content", "new_string", "text", "body")
-_LOCK = threading.RLock()
+_CONTENT_KEYS = ("content", "new_content", "text", "body")
 
-def _now():
-    return datetime.now(timezone.utc).isoformat()
 
-def _json(data):
-    return json.dumps(data, ensure_ascii=False, indent=2)
+def _is_write_tool(name: str) -> bool:
+    normalized = str(name or "").lower().rsplit(".", 1)[-1]
+    return any(normalized == item or normalized.endswith("_" + item)
+               for item in _WRITE_TOOL_NAMES)
 
-def _data_dir(ctx):
-    # Hermes' supported storage API creates a profile-scoped directory that
-    # survives plugin updates/removal. Keep a fallback for isolated unit tests.
-    del ctx
-    try:
-        root = Path(plugin_data_dir("patchreview")).expanduser()
-    except Exception:
-        home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
-        root = home / "plugin-data" / "patchreview"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
 
-def _load(queue_file):
-    try:
-        value = json.loads(queue_file.read_text(encoding="utf-8"))
-        return value if isinstance(value, list) else []
-    except FileNotFoundError:
-        return []
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Cannot read PatchReview queue: " + str(exc))
-
-def _save(queue_file, proposals):
-    queue_file.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix="pending-", suffix=".json", dir=str(queue_file.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(proposals, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, queue_file)
-    finally:
-        try: os.unlink(temp_name)
-        except FileNotFoundError: pass
-
-def _hash(value):
-    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
-
-def _diff(path, old, new):
-    before = (old or "").splitlines(keepends=True)
-    after = new.splitlines(keepends=True)
-    result = "".join(difflib.unified_diff(before, after, fromfile="a/" + path, tofile="b/" + path, lineterm="\n"))
-    return result or "--- a/" + path + "\n+++ b/" + path + "\n(no textual changes)\n"
-
-def _first_string(args, keys):
+def _first_string(args: dict, keys: tuple[str, ...]):
     for key in keys:
         value = args.get(key)
-        if isinstance(value, str) and value.strip(): return value
+        if isinstance(value, str) and value.strip():
+            return value
     return None
 
-def _extract_proposal(tool_name, args):
-    path = _first_string(args, _PATH_KEYS)
-    if not path: return None
-    path = os.path.expanduser(path)
-    lowered = tool_name.lower()
-    if "str_replace" in lowered or "search_replace" in lowered:
-        old_string, new_string = args.get("old_string"), args.get("new_string")
-        if not isinstance(old_string, str) or not isinstance(new_string, str): return None
-        try: old_content = Path(path).read_text(encoding="utf-8") if Path(path).exists() else ""
-        except (OSError, UnicodeError): return None
-        if old_string not in old_content: return None
-        return path, old_content.replace(old_string, new_string, 1), old_content
-    content = _first_string(args, _CONTENT_KEYS)
-    if content is None: return None
-    try: old_content = Path(path).read_text(encoding="utf-8") if Path(path).exists() else None
-    except (OSError, UnicodeError): return None
-    return path, content, old_content
 
-def _summary(item):
-    return {key: item.get(key) for key in ("id", "path", "tool", "status", "old_hash", "new_hash", "created_at")} | {"diff_preview": item.get("diff", "")[:5000]}
+def _extract_change(tool_name: str, args: dict):
+    path = _first_string(args, _PATH_KEYS)
+    if not path:
+        return None
+    target = Path(os.path.abspath(os.path.expanduser(path)))
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        return None
+    try:
+        old = target.read_text(encoding="utf-8") if target.exists() else ""
+    except (OSError, UnicodeError):
+        return None
+
+    old_string, new_string = args.get("old_string"), args.get("new_string")
+    if isinstance(old_string, str) and isinstance(new_string, str) and old_string:
+        # Hermes' patch tool and string-replacement tools share this shape.
+        # Use an exact match for the preview; Hermes remains responsible for
+        # applying the original call with its own matching semantics.
+        if old_string not in old:
+            return None
+        replace_all = bool(args.get("replace_all", False))
+        new = old.replace(old_string, new_string) if replace_all else old.replace(old_string, new_string, 1)
+    else:
+        # Multi-file/opaque patch payloads cannot be represented safely as a
+        # single-file diff, so fail closed.
+        if str(args.get("mode", "")).lower() == "patch" or "patch" in tool_name.lower():
+            return None
+        new = None
+        for key in _CONTENT_KEYS:
+            if key in args:
+                new = args[key] if isinstance(args[key], str) else None
+                break
+        if new is None:
+            return None
+
+    diff = "".join(difflib.unified_diff(
+        old.splitlines(keepends=True), new.splitlines(keepends=True),
+        fromfile="a/" + str(target), tofile="b/" + str(target), lineterm="\n"
+    ))
+    if not diff:
+        diff = "(No textual changes.)"
+    return str(target), diff
+
 
 def register(ctx: Any):
-    queue_file = _data_dir(ctx) / "pending.json"
-
-    def mutate(fn):
-        with _LOCK:
-            proposals = _load(queue_file)
-            result = fn(proposals)
-            _save(queue_file, proposals)
-            return result
-
     def pre_tool_call(tool_name="", args=None, task_id="", **kwargs):
         del task_id, kwargs
         name = str(tool_name or "")
-        if not any(marker in name.lower() for marker in _WRITE_MARKERS): return None
-        parsed = _extract_proposal(name, args if isinstance(args, dict) else {})
-        if parsed is None: return None
-        path, new_content, old_content = parsed
-        pid = uuid.uuid4().hex[:8]
-        item = {
-            "id": pid, "path": path, "tool": name, "old_content": old_content,
-            "new_content": new_content, "diff": _diff(path, old_content, new_content),
-            "old_hash": _hash(old_content), "new_hash": _hash(new_content),
-            "status": "pending", "created_at": _now(), "updated_at": _now(), "reason": None
+        if not _is_write_tool(name):
+            return None
+        parsed = _extract_change(name, args if isinstance(args, dict) else {})
+        if parsed is None:
+            return {
+                "action": "block",
+                "message": (
+                    "PatchReview cannot safely summarize this write request "
+                    "(unsupported arguments, unreadable/non-text file, or invalid target). "
+                    "No write was performed."
+                ),
+            }
+        path, diff = parsed
+        preview = diff[:6000]
+        if len(diff) > 6000:
+            preview += "\n... diff truncated ..."
+        return {
+            "action": "approve",
+            "message": (
+                "PatchReview human review required. Hermes will execute the original "
+                "write tool only if you approve it. PatchReview does not write files.\n"
+                f"Tool: {name}\nTarget: {path}\n\nProposed diff:\n{preview}"
+            ),
         }
-        try:
-            mutate(lambda proposals: proposals.append(item))
-        except Exception as exc:
-            return {"action": "block", "message": "PatchReview could not persist the proposal; write blocked: " + str(exc)}
-        return {"action": "block", "message": "PatchReview blocked " + name + ". Proposal " + pid + " for " + path + " is pending human review. Call patchreview_list, then patchreview_accept with id " + pid + ", or patchreview_reject."}
 
-    def handle_list(params, **kwargs):
-        del kwargs
-        status = str(params.get("status", "pending")).lower()
-        if status not in ("pending", "accepted", "rejected", "all"):
-            return _json({"success": False, "error": "status must be pending, accepted, rejected, or all"})
-        with _LOCK: proposals = _load(queue_file)
-        chosen = proposals if status == "all" else [p for p in proposals if p.get("status") == status]
-        return _json({"success": True, "count": len(chosen), "proposals": [_summary(p) for p in chosen]})
-
-    def accept_one(proposals, pid):
-        item = next((p for p in proposals if p.get("id") == pid), None)
-        if item is None: raise KeyError("Proposal " + repr(pid) + " not found")
-        if item.get("status") != "pending": raise ValueError("Proposal " + pid + " is not pending")
-        target = Path(item["path"]).expanduser()
-        try:
-            current_content = target.read_text(encoding="utf-8") if target.exists() else None
-        except (OSError, UnicodeError) as exc:
-            raise RuntimeError("Cannot verify current file before accepting: " + str(exc))
-        if _hash(current_content) != item.get("old_hash"):
-            raise ValueError("File changed after this proposal was created; reject it and stage a fresh proposal.")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix="." + target.name + ".patchreview-", dir=str(target.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(item["new_content"])
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, target)
-        finally:
-            try: os.unlink(temp_name)
-            except FileNotFoundError: pass
-        item["status"], item["updated_at"] = "accepted", _now()
-        return {"id": pid, "path": str(target), "status": "accepted", "new_hash": item["new_hash"]}
-
-    def handle_accept(params, **kwargs):
-        del kwargs
-        pid = str(params.get("id", "")).strip()
-        if not pid: return _json({"success": False, "error": "id is required"})
-        try: return _json({"success": True, **mutate(lambda proposals: accept_one(proposals, pid))})
-        except Exception as exc: return _json({"success": False, "error": str(exc)})
-
-    def handle_reject(params, **kwargs):
-        del kwargs
-        pid, reason = str(params.get("id", "")).strip(), str(params.get("reason", "")).strip() or None
-        if not pid: return _json({"success": False, "error": "id is required"})
-        def reject(proposals):
-            item = next((p for p in proposals if p.get("id") == pid), None)
-            if item is None: raise KeyError("Proposal " + repr(pid) + " not found")
-            if item.get("status") != "pending": raise ValueError("Proposal " + pid + " is not pending")
-            item.update(status="rejected", reason=reason, updated_at=_now())
-            return {"id": pid, "path": item["path"], "status": "rejected", "reason": reason}
-        try: return _json({"success": True, **mutate(reject)})
-        except Exception as exc: return _json({"success": False, "error": str(exc)})
-
-    def handle_accept_all(params, **kwargs):
-        del params, kwargs
-        # Persist after each successful file so a later failure cannot lose earlier
-        # accepted statuses or leave already-written files marked pending.
-        accepted = []
-        try:
-            with _LOCK:
-                proposals = _load(queue_file)
-                pending_ids = [p["id"] for p in proposals if p.get("status") == "pending"]
-            for pid in pending_ids:
-                accepted.append(mutate(lambda items, proposal_id=pid: accept_one(items, proposal_id)))
-            return _json({"success": True, "accepted_count": len(accepted), "accepted": accepted})
-        except Exception as exc:
-            return _json({"success": False, "error": str(exc), "accepted_count": len(accepted), "accepted": accepted})
-
-    def handle_status(params, **kwargs):
-        del params, kwargs
-        with _LOCK: proposals = _load(queue_file)
-        counts = {s: sum(1 for p in proposals if p.get("status") == s) for s in ("pending", "accepted", "rejected")}
-        return _json({"success": True, **counts, "total": len(proposals)})
-
-    def add_tool(name, description, properties, required, handler):
-        schema = {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required}}
-        ctx.register_tool(name=name, toolset="patchreview", schema=schema, handler=handler)
-
-    add_tool("patchreview_list", "List staged file changes for human review.", {"status": {"type": "string", "enum": ["pending", "accepted", "rejected", "all"], "description": "Filter; defaults to pending."}}, [], handle_list)
-    add_tool("patchreview_accept", "Accept one staged proposal and write its new content to disk.", {"id": {"type": "string", "description": "Proposal id to accept."}}, ["id"], handle_accept)
-    add_tool("patchreview_reject", "Reject one staged proposal without changing the file on disk.", {"id": {"type": "string", "description": "Proposal id to reject."}, "reason": {"type": "string", "description": "Optional rejection reason."}}, ["id"], handle_reject)
-    add_tool("patchreview_accept_all", "Accept every pending proposal and write them to disk.", {}, [], handle_accept_all)
-    add_tool("patchreview_status", "Return pending, accepted, rejected, and total proposal counts.", {}, [], handle_status)
     ctx.register_hook("pre_tool_call", pre_tool_call)

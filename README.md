@@ -1,79 +1,51 @@
 # PatchReview
 
-**Nothing writes to disk until the human accepts the diff.**
+**A human approval layer for Hermes file-writing tools.**
 
-PatchReview is a Hermes Agent Python plugin that intercepts supported file-writing tools before execution, stores each proposed change in a durable review queue, and exposes tools to inspect, accept, or reject proposals. The original write is blocked while a reviewable proposal is pending. Only patchreview_accept and patchreview_accept_all apply queued content.
+PatchReview hooks recognized file-write calls and escalates them to Hermes' native human-approval gate with a proposed diff. If the user approves, Hermes continues with the original tool call. If the user denies, the write does not proceed.
 
-## Features
+## How it works
 
-- Intercepts supported write-like tool names in pre_tool_call.
-- Persists proposals in pending.json under Hermes plugin data.
-- Captures old/new content, SHA-256 hashes, timestamps, and a unified diff.
-- Provides list, accept, reject, accept-all, and status tools.
-- Includes an offline glass-card UI with sample proposals.
-- No network calls, telemetry, API keys, or third-party Python dependencies.
+1. Hermes is about to execute a recognized file-writing tool.
+2. PatchReview reads the target text file and prepares a diff preview. It does not modify the file.
+3. PatchReview returns Hermes' `{"action": "approve", "message": "..."}` directive.
+4. Hermes presents its own approval prompt. The user decides.
+5. On approval, Hermes executes the original tool through its normal write path and protections.
+
+PatchReview does not expose accept/approve tools to the model, maintain a separate approval queue, or write files itself. This avoids model self-approval and preserves Hermes' native write guards.
 
 ## Install
 
-~~~bash
-cp -r patchreview ~/.hermes/plugins/patchreview
-hermes plugins doctor ~/.hermes/plugins/patchreview --ci
+```bash
+hermes plugins install Bilalsnz/plugin --no-deps --no-enable
+hermes plugins doctor patchreview --ci
 hermes plugins enable patchreview
-hermes plugins validate ./patchreview --install-deps
-~~~
+```
 
-Restart Hermes after enabling if the current process has already loaded its plugin registry.
+Restart Hermes if the current process was already running.
 
-## Tools
+## Coverage and limitations
 
-| Tool | Purpose |
-| --- | --- |
-| patchreview_list | List proposals; filter pending, accepted, rejected, or all. |
-| patchreview_accept | Apply one pending proposal by id. |
-| patchreview_reject | Reject one proposal; disk remains unchanged. |
-| patchreview_accept_all | Apply every pending proposal. |
-| patchreview_status | Return proposal counts. |
+The hook recognizes `write_file`, `create_file`, `edit_file`, `str_replace`, `search_replace`, `patch`, and `apply_patch` tool names. For full-content writes it reads a UTF-8 target and previews the proposed content. For string replacements, including Hermes' core `patch` tool when it supplies `old_string` and `new_string`, it computes a preview using those fields and the optional `replace_all` flag. Replacement previews preserve the surrounding file content. Matching is exact for preview generation, so some edits that Hermes' fuzzy matcher could apply may be blocked if the exact `old_string` is not present.
 
-The hook watches tool names containing write_file, patch, apply_patch, create_file, edit_file, str_replace, or search_replace (case-insensitive). It extracts paths and content from common argument keys. Replacement tools read the current UTF-8 file and stage the result of the first exact replacement.
+If PatchReview cannot safely parse the request, read the target, or produce a preview, it blocks that recognized call rather than silently allowing an unreviewed write. Opaque or multi-file patch payloads are currently unsupported and are blocked.
 
-If a supported call cannot be parsed, the hook leaves it alone as specified by the MVP contract. If queue persistence fails after parsing, it blocks the write rather than allowing an unreviewed change.
+PatchReview is a plugin-level tool-call guardrail, not an operating-system sandbox. It cannot intercept shell commands, arbitrary scripts, unrelated processes, or write tools whose names are not recognized. Hermes' native approval behavior and platform/session policy determine whether an approval prompt is available; unattended or unsupported contexts may deny the call.
 
-## Review UI
+The plugin itself does not write target files, invoke shell commands, make network requests, send telemetry, store credentials, or run background processes.
 
-Open ui/review.html directly in a browser. It runs offline with realistic sample proposals. A live integration can inject window.PATCHREVIEW_DATA before review.js loads. The static UI is a demo surface; its sample accept/reject buttons update browser presentation only. Actual filesystem writes are performed by Hermes tools.
+## Validation
 
-## 90-second demo script
+```bash
+python -m unittest discover -s tests -v
+hermes plugins doctor . --ci
+hermes plugins validate . --install-deps
+```
 
-1. 0–10s: Show hermes plugins list with PatchReview enabled.
-2. 10–25s: Ask Hermes: “Create file /tmp/patchreview-demo.txt with hello v1”.
-3. 25–35s: Show the blocked response and proposal id.
-4. 35–48s: Call patchreview_list and show the pending proposal and diff.
-5. 48–65s: Call patchreview_accept with that id.
-6. 65–78s: Run cat /tmp/patchreview-demo.txt and show hello v1 on disk.
-7. 78–90s: Optionally stage another write, reject it, and show that the file remains unchanged. End on the review UI.
+## Demo
 
-Keep the recording under 90 seconds, use a human voice, and show actual plugin behavior rather than a scripted mock.
-
-## Catalog submission
-
-1. Push the finished repository to GitHub.
-2. Run Hermes plugin doctor and validator; resolve every error.
-3. Copy the exact 40-character commit SHA for the release commit.
-4. Open a PR to NousResearch/hermes-agent adding plugin-catalog/patchreview.yaml. Include the public repository URL and pinned commit SHA, following the current catalog schema.
-5. Publish the demo video on X, tag @NousResearch, and keep it under 90 seconds.
-6. Submit the organizer's form with both the catalog PR URL and X video URL before the stated deadline.
-
-## Why this is more than a skill
-
-A skill can tell an agent to ask before writing, but it cannot reliably intercept a tool call at the execution boundary. PatchReview registers a real pre_tool_call policy hook that vetoes supported writes, persists proposed content outside the conversation, and exposes explicit tools that control when disk writes occur. Enforcement lives in the plugin runtime rather than relying only on model instructions.
-
-## MVP boundaries
-
-- Intercepts named write-like tools, not arbitrary shell commands or writes by unrelated processes.
-- Supports common path/content keys and exact string-replacement arguments. Unknown argument shapes are not intercepted.
-- The HTML UI is an offline demo surface; it does not directly mutate Hermes' queue or filesystem.
-- File contents are treated as UTF-8 text.
+Demonstrate a normal Hermes file-write request, show the native Hermes approval prompt with PatchReview's diff summary, approve one operation, then deny another. Verify the resulting files using Hermes' normal tools. The bundled HTML page, if shown, is an offline visual mockup and is not connected to the live approval flow.
 
 ## License
 
-MIT. See LICENSE.
+MIT. See [LICENSE](LICENSE).
