@@ -26,9 +26,9 @@ Restart Hermes if the current process was already running.
 
 ## Coverage and limitations
 
-The hook recognizes `write_file`, `create_file`, `edit_file`, `str_replace`, `search_replace`, `patch`, and `apply_patch` tool names. For full-content writes it reads a UTF-8 target and previews the proposed content. For string replacements it computes a preview using `old_string`, `new_string`, and the optional `replace_all` flag. Replacement previews preserve the surrounding file content.
+The hook recognizes `write_file`, `create_file`, `edit_file`, `str_replace`, `search_replace`, `patch`, and `apply_patch` tool names. For full-content writes it reads a UTF-8 target and previews the proposed content. For string replacements, including Hermes' core `patch` tool when it supplies `old_string` and `new_string`, it computes a preview using those fields and the optional `replace_all` flag. Replacement previews preserve the surrounding file content. Matching is exact for preview generation, so some edits that Hermes' fuzzy matcher could apply may be blocked if the exact `old_string` is not present.
 
-If PatchReview cannot safely parse the request, read the target, or produce a preview, it blocks that recognized call rather than silently allowing an unreviewed write. Opaque patch payloads are currently unsupported and are blocked.
+If PatchReview cannot safely parse the request, read the target, or produce a preview, it blocks that recognized call rather than silently allowing an unreviewed write. Opaque or multi-file patch payloads are currently unsupported and are blocked.
 
 PatchReview is a plugin-level tool-call guardrail, not an operating-system sandbox. It cannot intercept shell commands, arbitrary scripts, unrelated processes, or write tools whose names are not recognized. Hermes' native approval behavior and platform/session policy determine whether an approval prompt is available; unattended or unsupported contexts may deny the call.
 
