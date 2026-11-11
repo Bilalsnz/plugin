@@ -40,16 +40,20 @@ def _extract_change(tool_name: str, args: dict):
     except (OSError, UnicodeError):
         return None
 
-    lowered = tool_name.lower()
-    if "str_replace" in lowered or "search_replace" in lowered:
-        old_string, new_string = args.get("old_string"), args.get("new_string")
-        if not isinstance(old_string, str) or not isinstance(new_string, str) or not old_string:
-            return None
+    old_string, new_string = args.get("old_string"), args.get("new_string")
+    if isinstance(old_string, str) and isinstance(new_string, str) and old_string:
+        # Hermes' patch tool and string-replacement tools share this shape.
+        # Use an exact match for the preview; Hermes remains responsible for
+        # applying the original call with its own matching semantics.
         if old_string not in old:
             return None
         replace_all = bool(args.get("replace_all", False))
         new = old.replace(old_string, new_string) if replace_all else old.replace(old_string, new_string, 1)
     else:
+        # Multi-file/opaque patch payloads cannot be represented safely as a
+        # single-file diff, so fail closed.
+        if str(args.get("mode", "")).lower() == "patch" or "patch" in tool_name.lower():
+            return None
         new = None
         for key in _CONTENT_KEYS:
             if key in args:
